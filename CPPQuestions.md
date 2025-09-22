@@ -307,3 +307,355 @@ std::move does not move anything by itself — it simply casts its argument to a
 
 </details>
 <br>
+
+# Threading
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What is a thread?</strong></summary>
+
+A process is an independent instance of a program with its own memory space and resources. A thread is a lightweight unit of execution within a process — multiple threads share the same memory and resources of their parent process. Threads allow concurrent execution and can run on different CPU cores, but they require synchronization when accessing shared data.
+
+Key points:
+* Process - independent, isolated memory
+* Thread -  Lightweight, within a process and shares memory with the Process
+* Why threads matter? - They allow for concurrent processing, but require synchronization
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>How do you launch a thread in c++</strong></summary>
+
+In modern C++, you create a thread using the std::thread class. You pass it a callable — like a function, lambda, or member function — along with any arguments. The thread starts execution immediately upon construction. For example:
+
+```c++
+void work(int x) { /* do something */ }
+std::thread t(work, 5); // starts immediately
+t.join(); // wait for it to finish
+```
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What's the difference between `join()` and `detach()`</strong></summary>
+
+`join()` makes the calling thread wait until the new thread has finished. After a thead has been `joined` the `std::thread` object is no longer associated with a running thead.
+
+`detach()` lets the thread run independently in the background. The `std::thread` object is no longer tied to it and it cannot be interacted with anymore. When you detach, the thread keeps running in the background but within the **same process**. If the process ends, all its threads including detached ones are terminated.
+
+Think of it like this:
+
+* `join()` = “wait for me to finish before moving on”.
+
+* `detach()` = “I’ll finish on my own, don’t wait for me”.
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What problems can occur when multiple threads access the same variable simultaneously?</strong></summary>
+
+If multiple threads access the same variable without synchronisation and at least one modifies it, you get a data race. This is undefined behaviour: the program may read stale values, overwrite correct updates, or behave inconsistently depending on timing.
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>How can you protect shared data between threads in C++?</strong></summary>
+
+You can protect shared data with synchronization primitives. For simple, trivially copyable types, `std::atomic` ensures safe concurrent reads and writes without locks. For more complex data structures, you typically use a `std::mutex` to enforce mutual exclusion, protecting critical sections so only one thread can access the resource at a time. RAII wrappers like `std::lock_guard` or s`td::unique_lock` are used to manage the mutex safely.
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What is std::condition_variable used for?</strong></summary>
+
+A `std::condition_variable` is used for thread synchronization, allowing one or more threads to wait until notified by another thread that a condition has changed. It is typically used with a `std::mutex` and a predicate. Threads waiting on the condition variable call `wait()` (or `wait_for`/`wait_until`), and other threads signal them using `notify_one()` to wake a single waiting thread, or `notify_all()` to wake all waiting threads.
+
+```c++
+void worker_thread(const bool& ready)
+{
+    std::unique_lock lk(m);
+    cv.wait(lk, [&ready]{ return ready; });
+
+    std::cout << "Worker thread is processing data\n";
+    data += " after processing";
+
+    processed = true;
+    std::cout << "Worker thread signals data processing completed\n";
+
+    lk.unlock();
+    cv.notify_one();
+}
+
+int main()
+{
+    bool ready = false;
+
+    std::thread worker(worker_thread, std::ref(ready));
+
+    data = "Example data";
+    {
+        std::lock_guard lk(m);
+        ready = true;
+        std::cout << "main() signals data ready for processing\n";
+    }
+    cv.notify_one();
+
+    {
+        std::unique_lock lk(m);
+        cv.wait(lk, []{ return processed; });
+    }
+    std::cout << "Back in main(), data = " << data << '\n';
+
+    worker.join();
+}
+
+```
+
+<!-- 1. The worker thread will start immediately and take the lock.
+2. The lock will then be released in the wait and will block until the `ready` becomes true
+3. The main thread will take the lock (which is possible because the worker_thread no longer has it) and set ready to true.
+4. It then notifies the worker_thread via the condition_variable
+5. The worker thread can now unblock and continue, whilst concurrently the main thread will block due to its wait.
+6. the worker_thread sets processed to true, unlocks the mutex and notifies through the condition_variable
+7. the main thread can now continue as processed is true
+8. All work has been completed so the worker thread can be joined -->
+
+1. **Worker thread** starts and acquires the `mutex (m)`.
+
+2. **Worker calls** `cv.wait(lk, []{ return ready; })`:
+  * Releases the lock while waiting.
+  * Blocks until ready becomes true.
+
+
+3. **Main thread acquires the mutex** (possible because the worker released it), sets ready = true, and prints the message.
+
+4. **Main thread calls** `cv.notify_one()`, signaling the worker thread.
+
+5. Worker thread wakes up:
+  * Reacquires the mutex automatically.
+  * Checks the predicate (ready == true) — it’s true, so continues.
+  * Prints processing message and modifies data.
+
+
+6. **Worker sets** `processed = true`, unlocks the mutex, and calls `cv.notify_one()` to wake the main thread.
+
+7. **Main thread wakes up** from its `cv.wait` (predicate processed == true is now true) and continues execution.
+
+8. **All work completed**, so main calls `worker.join()` to wait for the worker to finish and ensure proper cleanup.
+
+💡 Key notes:
+* `cv.wait` always releases the mutex while waiting and reacquires it when unblocked.
+* Predicates in cv.wait handle spurious wake-ups safely.
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>std::thread and move semantics</strong></summary>
+
+1. Moving a std::thread
+
+```c++
+std::thread t1(work);
+std::thread t2 = std::move(t1); // OK, t1 is now in a moved-from state
+```
+
+Only one thread object can own a running thread at a time.
+
+After moving, t1 is “moved-from” and no longer joinable.
+
+**Lesson**: Moving transfers ownership; copying is not allowed.
+
+2. Trying to move a const std::thread
+```c++
+const std::thread t1(work);
+std::thread t2 = std::move(t1); // ❌ error
+```
+
+You cannot move from const objects, because moving modifies the source.
+
+Compiler will reject this.
+
+3. Returning a local std::thread from a function
+
+```c++
+std::thread create_thread()
+{
+    std::thread t(work);
+    return t; // Move constructor automatically used
+}
+```
+
+Returning by value triggers the move constructor (or copy elision).
+
+The thread is safely transferred to the caller.
+
+Lesson: std::thread is movable but not copyable.
+
+4. Passing a std::thread to a function
+
+```c++
+void accept_thread(std::thread t) { t.join(); }
+
+std::thread t(work);
+accept_thread(std::move(t)); // OK, ownership is transferred
+
+```
+
+You must use std::move, otherwise compilation fails.
+
+Shows how std::move is essential for transfer of ownership in thread APIs.
+
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>How can you prevent deadlocks when multiple threads need multiple mutexes?</strong></summary>
+
+Deadlocks occur when multiple threads wait indefinitely for resources held by each other. To prevent them when multiple mutexes are involved:
+
+* Use RAII wrappers like std::lock_guard or std::unique_lock to ensure mutexes are always released.
+
+* Acquire multiple mutexes in a consistent global order across all threads. This prevents circular waits. Global lock order can be maintained by assigned each mutex an "id" adding acquiring them in that order
+
+* Alternatively, use std::scoped_lock (C++17) to lock multiple mutexes atomically, avoiding deadlocks entirely.
+
+</details>
+<br>
+
+# References and Pointers
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What’s the main difference between a pointer and a reference in C++?</strong></summary>
+
+A pointer points to the address of an object. A reference however is an alias of an object.
+
+* A pointer can be reseated (made to point to another object), can be null, and requires explicit dereferencing (*ptr).
+
+* A reference must always bind to an object when initialised, cannot be reseated, and automatically acts as the object itself (no * needed to access).
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What’s the main difference between a pointer and a reference in C++?</strong></summary>
+
+A pointer points to the address of an object. A reference however is an alias of an object.
+
+* A pointer can be reseated (made to point to another object), can be null, and requires explicit dereferencing (*ptr).
+
+* A reference must always bind to an object when initialised, cannot be reseated, and automatically acts as the object itself (no * needed to access).
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>Can you have a null reference?</strong></summary>
+
+Not through through the standard, but you can create one by assigning a reference to a nulled ptr
+
+```c++
+int* p = nullptr;
+int& ref = *p;
+```
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What's a dangling reference?</strong></summary>
+
+A dangling reference happens when the object a reference refers to no longer exists:
+
+```c++
+int& foo() {
+    int x = 42;
+    return x;  // returns reference to local variable
+}              // x goes out of scope, ref dangles!
+```
+</details>
+<br>
+
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>What happens if you pass a pointer by value vs. passing it by reference to a function?</strong></summary>
+
+Passing a pointer by value means you create a copy of the pointer and operate on it in local scope within the method. Modifying the ptr will not change the original ptr passed in, though you can still dereference the pointer to modify the object it points to.
+
+ By reference means you are operating on the same original pointer, so modification within the method will effect the original pointer.
+
+ ```c++
+ void setNull(int* p) {
+    p = nullptr;  // only changes local copy
+}
+
+int x = 42;
+int* ptr = &x;
+setNull(ptr);
+std::cout << ptr << std::endl;  // still points to x
+
+~~~
+
+void setNull(int*& p) {
+    p = nullptr;  // modifies the original pointer
+}
+
+int x = 42;
+int* ptr = &x;
+setNull(ptr);
+std::cout << ptr << std::endl;  // now nullptr
+
+ ```
+</details>
+<br>
+
+```c++
+void increment(int* ptr) {
+    (*ptr)++;
+}
+
+void increment(int& ref) {
+    ref++;
+}
+
+```
+<!-- ---------------------------------------------------------------------------------------------------------------------------- -->
+<details>
+<summary><strong>Consider the functions above, how do you call them and which is safer?</strong></summary>
+
+```c++
+int x = 10;
+
+// Pointer version
+increment(&x);    // pass address of x
+
+// Reference version
+increment(x);     // pass x directly            // x goes out of scope, ref dangles!
+```
+
+* Reference version is safer because:
+  * You cannot pass nullptr.
+  * There’s no need for explicit dereferencing.
+  * Compiler guarantees you have a valid object at compile time.
+
+
+* Pointer version is more flexible:
+  * Can pass nullptr to indicate “no object”.
+  * Caller must explicitly dereference — risk of UB if nullptr is passed.
+
+References are usually preferred when the function must operate on a valid object, pointers when optional or nullable semantics are needed.
+</details>
+<br>
